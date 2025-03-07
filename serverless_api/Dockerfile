@@ -4,9 +4,6 @@ FROM python:3.9-slim
 # Set the working directory in the container
 WORKDIR /app
 
-COPY netskope-cert-bundle.pem /app/netskope-cert-bundle.pem
-ENV REQUESTS_CA_BUNDLE=/app/netskope-cert-bundle.pem
-
 # Copy requirements file and install dependencies
 COPY requirements.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
