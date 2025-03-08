@@ -1,9 +1,10 @@
 from aws_cdk import (
     Stack,
     aws_ec2 as ec2,
-    aws_eks as eks,
+    aws_ecs as ecs,
+    aws_ecs_patterns as ecs_patterns,
+    aws_cloudwatch as cloudwatch, Duration,
 )
-from aws_cdk.lambda_layer_kubectl_v32 import KubectlV32Layer
 from constructs import Construct
 import yaml
 import os
@@ -19,44 +20,47 @@ class ResilientScalableAwsApiStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
-        # Create a VPC with up to 3 Availability Zones
-        vpc = ec2.Vpc(self, "EksVpc", max_azs=3)
+        # Create a VPC with a maximum of 2 Availability Zones.
+        vpc = ec2.Vpc(self, "MyVpc", max_azs=2)
 
-        # Create the EKS cluster within the VPC
-        cluster = eks.Cluster(
-            self, "EksCluster",
-            version=eks.KubernetesVersion.V1_32,
-            kubectl_layer=KubectlV32Layer(self, "kubectl"),
-            vpc=vpc,
-            default_capacity = 0,
+        # Create an ECS cluster within the VPC.
+        cluster = ecs.Cluster(self, "MyCluster", vpc=vpc)
+
+        # Create a Fargate service with an Application Load Balancer.
+        fargate_service = ecs_patterns.ApplicationLoadBalancedFargateService(
+            self,
+            "MyFargateService",
+            cluster=cluster,
+            cpu=256,
+            min_healthy_percent=50,
+            memory_limit_mib=512,
+            desired_count=2,
+            public_load_balancer=True,
+            task_image_options=ecs_patterns.ApplicationLoadBalancedTaskImageOptions(
+                image=ecs.ContainerImage.from_registry("fntkg/serverless-api:0.1.0")
+            ),
         )
 
-        # Create a Managed Node Group in multiple AZs
-        cluster.add_auto_scaling_group_capacity(
-            "EksNodeGroup",
-            instance_type=ec2.InstanceType("t3.micro"),
-            min_capacity=3,
-            desired_capacity=3,
-            max_capacity=6,
-            vpc_subnets={"subnet_type": ec2.SubnetType.PUBLIC}  # Multiple AZs
+        # Configure auto scaling for the service based on CPU utilization.
+        scaling = fargate_service.service.auto_scale_task_count(
+            min_capacity=2,
+            max_capacity=10
+        )
+        scaling.scale_on_cpu_utilization(
+            "CpuScaling",
+            target_utilization_percent=50,
+            scale_in_cooldown=Duration.seconds(60),
+            scale_out_cooldown=Duration.seconds(60),
         )
 
-        # Load external Kubernetes manifests
-        deployment_manifest = self.load_yaml("k8s_manifests/deployment.yml")
-        service_manifest = self.load_yaml("k8s_manifests/service.yml")
-        hpa_manifest = self.load_yaml("k8s_manifests/hpa.yml")
-
-        # Apply the Kubernetes manifests to the cluster
-        cluster.add_manifest("ApiDeployment", deployment_manifest)
-        cluster.add_manifest("ApiService", service_manifest)
-        # TODO : Asegúrate de tener instalado el metrics-server en tu clúster, ya que el HPA lo requiere para obtener las métricas de CPU.
-        cluster.add_manifest("ApiHpa", hpa_manifest)
-
-        # TODO : Establecer alerting
-
-    @staticmethod
-    def load_yaml(file_path: str):
-        """Utility method to load a YAML file and return its content as a dict."""
-        abs_path = os.path.join(os.path.dirname(__file__), file_path)
-        with open(abs_path, "r") as file:
-            return yaml.safe_load(file)
+        # Set up a CloudWatch Alarm to monitor high CPU usage.
+        cloudwatch.Alarm(
+            self,
+            "HighCpuAlarm",
+            metric=fargate_service.service.metric_cpu_utilization(),
+            threshold=80,
+            evaluation_periods=2,
+            datapoints_to_alarm=2,
+            alarm_description="Alarm when CPU exceeds 80%",
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
