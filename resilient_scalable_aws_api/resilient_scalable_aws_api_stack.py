@@ -6,8 +6,6 @@ from aws_cdk import (
     aws_cloudwatch as cloudwatch, Duration,
 )
 from constructs import Construct
-import yaml
-import os
 
 
 class ResilientScalableAwsApiStack(Stack):
